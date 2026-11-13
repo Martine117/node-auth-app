@@ -58,7 +58,7 @@ function renderForm(mode) {
 function renderWelcome() {
   app.innerHTML = `
     <h1></h1>
-    <p>You are logged in.</p>
+    <p>You are logged in. CI/CD deployment verified.</p>
     <button type="button">Log out</button>`;
   app.querySelector("h1").textContent = `Welcome, ${currentUser}!`;
   app.querySelector("button").addEventListener("click", () => {
