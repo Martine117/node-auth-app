@@ -1,0 +1,89 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cicd-main
+  cancel-in-progress: false
+
+jobs:
+  test-build-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      COMPOSE_PROJECT_NAME: ci
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '26'
+          cache: npm
+
+      - name: Prepare isolated CI database credentials
+        shell: bash
+        run: |
+          test -n "$DOCKERHUB_USERNAME" || { echo 'Configure the DOCKERHUB_USERNAME Actions variable.'; exit 1; }
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          printf 'POSTGRES_PASSWORD=%s\n' "$password" >> "$GITHUB_ENV"
+          printf 'DATABASE_URL=postgres://app:%s@db:5432/auth\n' "$password" >> "$GITHUB_ENV"
+
+      - name: Install test dependencies
+        run: npm ci
+
+      - name: Test webhook authentication and deployment filtering
+        run: python -m unittest discover -s scripts -p 'test_deploy_server.py' -v
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build and start the full stack
+        run: |
+          docker compose build
+          docker compose up -d --wait --wait-timeout 120
+          curl --fail --retry 15 --retry-delay 2 --retry-all-errors http://localhost:5173/api/health
+
+      - name: Test the full stack with Playwright
+        run: npx playwright test --config playwright.compose.config.js
+
+      # Everything below runs only if the full-stack tests passed.
+      # Publish the very same images that were tested, not another rebuild.
+      - name: Tag tested frontend and backend images
+        run: |
+          docker tag ci-frontend:latest "$DOCKERHUB_USERNAME/auth-app:frontend"
+          docker tag ci-backend:latest "$DOCKERHUB_USERNAME/auth-app:backend"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish both tested images
+        run: |
+          docker push "$DOCKERHUB_USERNAME/auth-app:frontend"
+          docker push "$DOCKERHUB_USERNAME/auth-app:backend"
+
+      - name: Save Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+      - name: Stop CI containers
+        if: always()
+        run: docker compose down
